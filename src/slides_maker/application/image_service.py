@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import quote_plus
 
 import httpx
 from PIL import Image, ImageDraw, ImageFont
@@ -35,6 +36,32 @@ class StockImageProvider:
             return response.content
 
 
+class UnsplashImageProvider:
+    def generate(self, prompt: str) -> bytes:
+        query = quote_plus(prompt)
+        url = f"https://source.unsplash.com/featured/1024x1024/?{query}"
+        with httpx.Client(timeout=60, follow_redirects=True) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            return response.content
+
+
+class ChainedImageProvider:
+    def __init__(self, providers: list[ImageProvider]) -> None:
+        self.providers = providers
+
+    def generate(self, prompt: str) -> bytes:
+        last_exc: Exception | None = None
+        for provider in self.providers:
+            try:
+                return provider.generate(prompt)
+            except Exception as exc:
+                last_exc = exc
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("No image providers configured")
+
+
 @dataclass
 class ImageService:
     output_dir: Path
@@ -51,9 +78,9 @@ class ImageService:
                 try:
                     content = self.fallback.generate(prompt)
                 except Exception:
-                    content = self._placeholder_image(prompt)
+                    content = self._handle_image_failure(prompt)
             else:
-                content = self._placeholder_image(prompt)
+                content = self._handle_image_failure(prompt)
 
         target.write_bytes(content)
         return target
@@ -71,14 +98,22 @@ class ImageService:
         image.save(buffer, format="PNG")
         return buffer.getvalue()
 
+    def _handle_image_failure(self, prompt: str) -> bytes:
+        allow_placeholder = os.environ.get("ALLOW_PLACEHOLDER_IMAGES", "0") == "1"
+        if allow_placeholder:
+            return self._placeholder_image(prompt)
+        raise RuntimeError("Image generation failed. Set ALLOW_PLACEHOLDER_IMAGES=1 to allow placeholders.")
+
 
 def build_image_service(output_dir: Path) -> ImageService:
     use_openai = os.environ.get("USE_OPENAI_IMAGES", "0") == "1"
     primary: ImageProvider
     if use_openai:
-        primary = OpenAIImageProvider()
-        fallback: ImageProvider | None = StockImageProvider()
+        primary = ChainedImageProvider(
+            [OpenAIImageProvider(), UnsplashImageProvider(), StockImageProvider()]
+        )
+        fallback: ImageProvider | None = None
     else:
-        primary = StockImageProvider()
+        primary = ChainedImageProvider([UnsplashImageProvider(), StockImageProvider()])
         fallback = None
     return ImageService(output_dir=output_dir, primary=primary, fallback=fallback)

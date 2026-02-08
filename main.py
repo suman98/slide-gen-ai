@@ -1,7 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+SRC_PATH = PROJECT_ROOT / "src"
+if str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
+
+load_dotenv(PROJECT_ROOT / ".env")
 
 from slides_maker.application.ai_agent import SlidePlanner
 from slides_maker.application.image_service import build_image_service
