@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -30,20 +31,14 @@ class StockImageProvider:
     def generate(self, prompt: str) -> bytes:
         seed = abs(hash(prompt)) % 10_000
         url = f"https://picsum.photos/seed/{seed}/1024/1024"
-        with httpx.Client(timeout=60) as client:
-            response = client.get(url)
-            response.raise_for_status()
-            return response.content
+        return _fetch_image_bytes(url)
 
 
 class UnsplashImageProvider:
     def generate(self, prompt: str) -> bytes:
         query = quote_plus(prompt)
         url = f"https://source.unsplash.com/featured/1024x1024/?{query}"
-        with httpx.Client(timeout=60, follow_redirects=True) as client:
-            response = client.get(url)
-            response.raise_for_status()
-            return response.content
+        return _fetch_image_bytes(url, follow_redirects=True)
 
 
 class ChainedImageProvider:
@@ -60,6 +55,26 @@ class ChainedImageProvider:
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("No image providers configured")
+
+
+def _fetch_image_bytes(url: str, follow_redirects: bool = False) -> bytes:
+    headers = {
+        "User-Agent": "slides-maker/1.0 (+https://github.com/suman98/slide-gen-ai)",
+        "Accept": "image/*,*/*;q=0.8",
+    }
+    timeout = httpx.Timeout(15.0, connect=10.0)
+    last_exc: Exception | None = None
+    for _ in range(3):
+        try:
+            with httpx.Client(timeout=timeout, follow_redirects=follow_redirects, headers=headers) as client:
+                response = client.get(url)
+                response.raise_for_status()
+                return response.content
+        except Exception as exc:
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Image download failed")
 
 
 @dataclass
@@ -99,10 +114,17 @@ class ImageService:
         return buffer.getvalue()
 
     def _handle_image_failure(self, prompt: str) -> bytes:
-        allow_placeholder = os.environ.get("ALLOW_PLACEHOLDER_IMAGES", "0") == "1"
-        if allow_placeholder:
-            return self._placeholder_image(prompt)
-        raise RuntimeError("Image generation failed. Set ALLOW_PLACEHOLDER_IMAGES=1 to allow placeholders.")
+        require_real = os.environ.get("REQUIRE_REAL_IMAGES", "0") == "1"
+        if require_real:
+            raise RuntimeError(
+                "Image generation failed. Disable REQUIRE_REAL_IMAGES or allow placeholders."
+            )
+        print(
+            "Image generation failed; using placeholder. "
+            "Set REQUIRE_REAL_IMAGES=1 to fail instead.",
+            file=sys.stderr,
+        )
+        return self._placeholder_image(prompt)
 
 
 def build_image_service(output_dir: Path) -> ImageService:
